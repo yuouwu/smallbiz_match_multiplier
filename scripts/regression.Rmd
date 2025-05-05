@@ -1,0 +1,416 @@
+---
+title: "regression"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+installation_needed  <- FALSE
+loading_needed       <- TRUE
+
+package_list <- c("AER","foreign", "sandwich","ggplot2", "reshape", "boot", "zoo", 
+                  "quantreg", "dummies", "stargazer", "lmtest", "plm","openxlsx", "stringr",
+                  "moments",'readstata13','gmm', 'dplyr', 'tidyr','xtable', 'sem', 'bdynsys', 
+                  'ivpack','fixest','modelsummary')
+
+if(installation_needed){install.packages(package_list)}
+if(loading_needed){lapply(package_list, require, character.only = TRUE)}
+
+rm(list=ls())
+
+dir_reg <- "/"
+mpc_df <-  read.xlsx(paste0(dir_reg,"mpc.xlsx",sep=""))
+gdp_df <- read.xlsx(paste0(dir_reg,"gdp.xlsx",sep=""))
+gdp_fips_df <- read.xlsx(paste0(dir_reg,"gdp_fips.xlsx",sep=""))
+infection_df <- read.xlsx(paste0(dir_reg,"infection.xlsx",sep=""))
+small_biz_df <- read.xlsx(paste0(dir_reg,"small_biz.xlsx",sep=""))
+ppp_df <- read.csv(paste0(dir_reg,"ppp_county.csv",sep=""))
+```
+
+```{r}
+gdp=gdp_df
+gdp$date_yw=paste0(gdp$year,str_pad(gdp$week,2,"left",pad = "0"))
+gdp <- gdp %>%  mutate(Rank=rank(date_yw),RankDown=Rank-1)
+gdp <- gdp %>% left_join(select(gdp,Rank,lag_gdp_wei=gdp_wei),by=c('RankDown'='Rank')
+) %>% select(-Rank,-RankDown)
+gdp <- gdp %>% arrange(year) %>% mutate(gdp_diff=(gdp_wei-lag_gdp_wei)/lag_gdp_wei)
+
+ppp=ppp_df
+ppp$date_yw=paste0(ppp$year,str_pad(ppp$week,2,"left",pad = "0"))
+ppp$fips <- str_pad(ppp$COUNTY, 5, "left", pad = "0")
+#ppp <- ppp %>% group_by(fips) %>% mutate(Rank=rank(date),RankDown=Rank-1)
+#ppp <- ppp %>% left_join(select(ppp,Rank,lag_ppp=ppp,fips),by=c('RankDown'='Rank','fips')
+#) %>% select(-Rank,-RankDown)
+#ppp <- ppp %>% group_by(fips) %>% arrange(year,fips) %>% mutate(ppp_diff=ppp-lag_ppp)
+
+infection=infection_df
+infection$date_yw=paste0(infection$year,str_pad(infection$week,2,"left",pad = "0"))
+columns <- c('new_death_rate', 'new_case_rate', 'new_death_count', 'new_case_count')
+infection <- infection %>% mutate(across(columns,as.numeric))
+```
+
+```{r}
+mpc=mpc_df
+#mpc$positive_mpc <- mpc$mpc
+#mpc$positive_mpc[mpc$mpc < 0] <- 0
+#mpc$mpc[mpc$mpc < 0] <- NA
+mpc <- mpc %>% mutate(mpc=mpc+abs(min(mpc)))
+
+mpc$date_yw=paste0(mpc$year,str_pad(mpc$week,2,"left",pad = "0"))
+mpc <- mpc %>% group_by(fips) %>% mutate(Rank=rank(date_yw),RankDown=Rank-1)
+mpc <- mpc %>% left_join(select(mpc,Rank,lag_income_region=income_region,lag_annual_income=annual_income,lag_pop=tot_pop,fips),by=c('RankDown'='Rank','fips')
+) %>% select(-Rank,-RankDown)
+
+mpc <- mpc %>% group_by(fips) %>% arrange(year,fips) %>% mutate(income_diff=(annual_income-lag_annual_income)/lag_annual_income) %>% mutate(mpc_lag=lag(mpc))
+
+mpc <- mpc %>% group_by(date_yw) %>% mutate(income_weight=lag_annual_income/sum(lag_annual_income,na.rm=TRUE)) %>%
+mutate(weighted_income=lag_annual_income/sum(lag_annual_income,na.rm=TRUE)) %>% mutate(weighted_pop=lag_pop/sum(lag_pop,na.rm=TRUE))
+
+# lag revenue
+small_biz=small_biz_df
+small_biz <- small_biz %>% group_by(fips) %>% mutate(Rank=rank(date_yw),RankDown=Rank-1)
+small_biz <- small_biz %>% left_join(select(small_biz,Rank,lag_revenue=revenue_all,fips),by=c('RankDown'='Rank','fips')
+) %>% select(-Rank,-RankDown)
+small_biz <- small_biz %>% group_by(fips) %>% arrange(year,fips) %>% mutate(revenue_diff=revenue_all-lag_revenue) 
+#small_biz[c("week","year")] <- lapply(small_biz[c("week","year")], as.numeric)
+```
+
+
+```{r}
+# merge income to revenue data set
+income_revenue_reg_df <- left_join(mpc, small_biz %>% select(revenue_diff,revenue_all,merchants_all,fips,date_yw), by = c("fips","date_yw"))
+income_revenue_reg_df <- left_join(income_revenue_reg_df, ppp %>% select(ppp,fips,date_yw), by = c("fips","date_yw"))
+income_revenue_reg_df <- left_join(income_revenue_reg_df, infection %>% select(new_case_rate,new_death_rate,new_case_count,new_death_count,fips,date_yw), by = c("fips","date_yw")) %>% mutate(state=substr(fips,1,2))
+
+# merge revenue to gdp data set
+revenue_gdp_reg_df <- left_join(small_biz,gdp %>% select (gdp_diff, date_yw), by= c("date_yw"))
+revenue_gdp_reg_df <- right_join(mpc, revenue_gdp_reg_df %>% select(merchants_all, revenue_all,revenue_diff, gdp_diff,fips, date_yw), by= c("fips","date_yw")) %>% mutate(state=substr(fips,1,2))
+revenue_gdp_reg_df <- left_join(revenue_gdp_reg_df, infection %>% select(new_case_rate,new_death_rate,new_case_count,new_death_count,fips,date_yw), by = c("fips","date_yw")) %>% mutate(state=substr(fips,1,2))
+
+```
+
+## Regression
+
+Step2: elasticity of income to small business revenue
+
+time fixed effect control for unobservables that are the same across states but varies with time (different variant of covid?). 
+state fixed effect controls for unobservables that are varies across states but are constant over time (for example sentiment to state legislations, mask policies). 
+
+for people with high MPC, the relationship between income difference and small business revenue diff is stronger?
+
+income variability driven by extensive margin respons (unemployment rate, rather than wage change)
+
+mpc is the same across time
+
+```{r}
+#reg <- femlm(income_diff ~ mpc*revenue_diff+mpc+revenue_diff+new_case_rate+new_death_rate+merchants_all,
+#           data = income_revenue_reg, index = c("fips","date_yw"), model="within")
+
+# clean up stuff
+
+income_revenue_reg0 <- feols(income_diff ~ mpc_lag*revenue_diff , income_revenue_reg_df,weights=income_revenue_reg_df$weighted_income)
+summary(income_revenue_reg0,'hetero')
+
+income_revenue_reg1 <- feols(income_diff ~ new_death_rate+merchants_all+mpc_lag*revenue_diff | date_yw, income_revenue_reg_df, weights=income_revenue_reg_df$weighted_income)
+summary(income_revenue_reg1,'hetero')
+
+income_revenue_reg2 <- feols(income_diff ~ new_death_rate+merchants_all+mpc_lag*revenue_diff | fips, income_revenue_reg_df, weights=income_revenue_reg_df$weighted_income)
+summary(income_revenue_reg2,'cluster')
+
+income_revenue_reg3 <- feols(income_diff ~ new_death_rate+merchants_all+mpc_lag*revenue_diff | fips+date_yw, income_revenue_reg_df, weights=income_revenue_reg_df$weighted_income)
+summary(income_revenue_reg3,'cluster')
+
+p_income <- ggplot(income_revenue_reg_df, aes(x=income_diff)) + 
+  geom_histogram()
+p_rev <- ggplot(income_revenue_reg_df, aes(x=revenue_diff)) + 
+  geom_histogram()
+
+#summary(income_revenue_reg_tm,cluster=~state)
+
+#fixedEffects = fixef(income_revenue_reg)
+#summary(fixedEffects)
+
+# calculate elasticity
+# which_reg <- income_revenue_reg_weighted
+which_reg <- income_revenue_reg3
+income_margin_coef=coef(which_reg, 'mpc_lag:revenue_diff')
+income_main_coef=rep(0, length(income_margin_coef))# coef(which_reg, 'revenue_diff')[1]
+coef_df <- revenue_gdp_reg_df %>% select(fips,mpc_lag,mpc,revenue_diff,date_yw,annual_income,income_region,weighted_income)
+coef_df <- coef_df %>% mutate(income_elasticity=mpc_lag*income_margin_coef+income_main_coef)
+
+# we set the dictionary once and for all
+#myDict = c("log(dist_km)" = "$\\ln (Distance)$", "(Intercept)" = "Constant")
+# 1st export: we change the signif code and drop the intercept
+#etable(res_multi, signifCode = c("a" = 0.01, "b" = 0.05),
+#       drop = "Const", dict = myDict, file = "Estimation Tables.tex", 
+#       replace = TRUE, title = "First export -- normal Standard-errors")
+# 2nd export: clustered S-E + distance as the first coefficient
+#etable(res_multi, cluster = ~Product, order = "Dist", 
+#       dict = myDict, file = "Estimation Tables.tex", 
+#       title = "Second export -- clustered standard-errors (on Product variable)")
+
+
+#characteristics_reg <- feols(income_diff ~ new_case_rate+new_death_rate+black*revenue_diff+income_bracket*revenue_diff+tot_male*revenue_diff | fips+date_yw, income_revenue_reg_df)
+#summary(characteristics_reg)
+```
+
+```{r}
+library(zoo)
+library(dplyr)
+library(TTR)
+
+iv_df<-income_revenue_reg_df
+iv_df <- iv_df %>% left_join(gdp_fips_df,by='fips')
+#iv_df$ppp_rescale<- iv_df$ppp/iv_df$gdp_2019
+iv_df$ppp_impute <- iv_df$ppp %>% replace_na(0)
+
+my_ema <- function(x, n) {
+  tryCatch( {
+    EMA(x, n)
+  },
+  error = function(e) {
+    NA
+  })
+}
+
+#iv_df <- iv_df %>%
+#       arrange(fips,date_yw) %>%
+#       group_by(fips) %>%
+       #mutate(roll_sum = roll_sum(ppp_impute, 12, align = "right", fill = 0))
+#         mutate(ppp_impute = my_ema(ppp_impute, 13))
+suma = function(x) if (all(is.na(x))) x[NA_integer_] else sum(x, na.rm = TRUE)
+simple_sum = function(x) sum(x,na.rm=TRUE)
+
+iv_df <- iv_df %>%
+         arrange(fips,date_yw) %>%
+         group_by(fips) %>%
+         #mutate(roll_sum = roll_sum(ppp_impute, 12, align = "right", fill = 0))
+         mutate(ppp_impute = rollapplyr(ppp, 8, suma, partial = TRUE) )
+
+iv_df$ppp_dummy <- iv_df$ppp_impute
+iv_df$ppp_dummy[iv_df$ppp_impute > 0] <- 1
+iv_df$ppp_dummy[iv_df$ppp_impute == 0] <- 0
+#iv_df$ppp_dummy <- iv_df$ppp_dummy %>% replace_na(0)
+
+iv_reg <- feols(income_diff ~ new_death_rate+merchants_all | mpc_lag*revenue_diff ~ mpc_lag*ppp_impute, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg)
+
+iv_reg2 <- feols(income_diff ~ new_death_rate+merchants_all | mpc_lag*revenue_diff ~ mpc_lag*ppp_dummy, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg2)
+
+iv_reg3 <- feols(income_diff ~ new_death_rate+merchants_all | fips | mpc_lag*revenue_diff ~ mpc_lag*ppp_dummy, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg3)
+
+iv_reg4 <- feols(income_diff ~ new_death_rate+merchants_all | date_yw | mpc_lag*revenue_diff ~ mpc_lag*ppp_dummy, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg4)
+
+iv_reg5 <- feols(income_diff ~ new_death_rate+merchants_all | fips + date_yw | mpc_lag*revenue_diff ~ mpc_lag*ppp_dummy, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg5)
+
+iv_reg6 <- feols(income_diff ~ new_death_rate+merchants_all | fips | mpc_lag*revenue_diff ~ mpc_lag*ppp_impute, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg6)
+
+iv_reg7 <- feols(income_diff ~ new_death_rate+merchants_all | date_yw | mpc_lag*revenue_diff ~ mpc_lag*ppp_impute, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg7)
+
+iv_reg8 <- feols(income_diff ~ new_death_rate+merchants_all | fips + date_yw | mpc_lag*revenue_diff ~ mpc_lag*ppp_impute, iv_df,weights=iv_df$weighted_income)
+summary(iv_reg8)
+
+```
+
+```{r}
+library(ggplot2)
+
+graph_df <- revenue_gdp_reg_df %>% group_by(fips) %>% summarise(mod = list(lm(revenue_diff ~ gdp_diff+new_case_rate+merchants_all)))%>%rowwise()
+
+graph_df$coef <- lapply(graph_df$mod,function(x) x$coefficients[[2]])
+
+gdp_graph <- left_join(income_revenue_reg_df, graph_df %>% select(coef,fips), by = c("fips")) %>% select(fips,coef,mpc,tot_pop,median) %>% distinct() %>% unnest(coef)  
+mpc_mean <- gdp_graph %>% group_by(fips) %>% summarise(mean_mpc=mean(mpc))
+gdp_graph <- left_join(gdp_graph, mpc_mean, by = c("fips")) %>% select(-mpc) %>% distinct() %>% mutate(weighted_pop=tot_pop/sum(gdp_graph$tot_pop)) %>% mutate(weighted_income=median/sum(gdp_graph$median)) %>% mutate(income_weight_mpc=mean_mpc*weighted_income) %>% mutate(income_weight_coef=coef*weighted_income)
+
+gdp_graph$non_zero_mpc <- gdp_graph$mean_mpc
+gdp_graph$non_zero_mpc[gdp_graph$non_zero_mpc == 0] <- NA
+ 
+#ggplot(gdp_graph, aes(x=income_weight_mpc, y=income_weight_coef)) + geom_point()+geom_smooth(method=lm)
+
+ggplot(gdp_graph, aes(x=non_zero_mpc, y=coef)) + geom_point()+geom_smooth(method=lm)
+#gdp_graph <- gdp_graph %>% keep( ~ !is.null(.) )
+
+
+```
+
+
+```{r}
+
+gdp_revenue_reg0 <- feols(revenue_diff ~ mpc_lag*gdp_diff , revenue_gdp_reg_df)
+summary(gdp_revenue_reg0,"hetero")
+
+gdp_revenue_reg1 <- feols(revenue_diff ~ mpc_lag*gdp_diff, revenue_gdp_reg_df, weights = revenue_gdp_reg_df$weighted_income)
+summary(gdp_revenue_reg1,"hetero")
+
+gdp_revenue_reg2 <- feols(revenue_diff ~ new_death_rate+merchants_all+mpc_lag*gdp_diff, revenue_gdp_reg_df)
+summary(gdp_revenue_reg2,"hetero")
+
+gdp_revenue_reg3 <- feols(revenue_diff ~ new_death_rate+merchants_all+mpc_lag*gdp_diff | date_yw, revenue_gdp_reg_df)
+summary(gdp_revenue_reg3,"hetero")
+
+gdp_revenue_reg4 <- feols(revenue_diff ~ new_death_rate+merchants_all+mpc_lag*gdp_diff | fips + date_yw, revenue_gdp_reg_df)
+summary(gdp_revenue_reg4,"cluster")
+
+p_gdp <- ggplot(revenue_gdp_reg_df, aes(x=gdp_diff)) + 
+  geom_histogram()
+
+revenue_coef=coef(gdp_revenue_reg3, 'mpc_lag:gdp_diff')
+coef_df <- coef_df %>% mutate(business_elasticity=mpc_lag*revenue_coef)
+
+```
+
+```{r}
+library(simPop)
+cov_df <- coef_df
+cov_df <- cov_df[!is.na(cov_df$mpc), ]
+cov_df <- cov_df[!is.na(cov_df$income_region), ]
+cov_df <- cov_df[!is.na(cov_df$income_elasticity), ]
+cov_df <- cov_df[!is.na(cov_df$business_elasticity), ]
+cov_df <- ungroup(cov_df)
+cov_df <- cov_df %>% mutate(cov_weight=income_region/sum(income_region,na.rm=TRUE)) %>% mutate(product=income_elasticity*business_elasticity)
+# cov <- cov.wt(cov_df %>% select(mpc,product), wt = cov_weight, cor = FALSE, center = TRUE,method = "unbiased")
+
+cov <- cov.wt(cov_df[c("mpc", "product")], wt = cov_df$cov_weight, cor = FALSE, center = TRUE,method = "unbiased")
+cov_unweight <- cov.wt(cov_df[c("mpc", "product")], cor = FALSE, center = TRUE,method = "unbiased")
+
+p_mpc <- ggplot(cov_df, aes(x=mpc)) + 
+  geom_histogram()
+p_mpc_lag <- ggplot(cov_df, aes(x=mpc_lag)) + 
+  geom_histogram()
+p_income_elas <- ggplot(cov_df, aes(x=income_elasticity)) + 
+  geom_histogram()
+p_business_elas <- ggplot(cov_df, aes(x=business_elasticity)) + 
+  geom_histogram()
+
+cov_unweight$cov
+cov$cov
+
+```
+```{r}
+# produce descriptive stat table
+
+descriptive_stat_df<-revenue_gdp_reg_df %>% ungroup() %>% left_join(select(income_revenue_reg_df,fips,date_yw),by=(c('fips','date_yw'))) %>%  select(fips,annual_income,income_region,income_diff,mpc,revenue_diff,gdp_diff,merchants_all,new_death_rate)
+stargazer(as.data.frame(descriptive_stat_df), type = "latex", title="Descriptive statistics", digits=1, out="table1.txt",covariate.labels=c("Annual individual income","Weekly county income","Weekly income percentage change","County MPC","Weekly revenue percentage change","Weekly GDP percentage change","Num. of small business openings (rel. to Jan 2020)","New COVID-19 death rate"),omit.summary.stat = c('p25','p75','min','max'))
+
+```
+
+```{r}
+# produce regression result tables
+
+setFixest_dict(c(mpc_lag = "Lag MPC", revenue_diff = "Weekly revenue percentage change",new_death_rate = "New COVID-19 death rate", merchants_all = "Num. of small business openings",date_yw='Time',fips='County',income_diff='Weekly income percentage change',gdp_diff='Weekly GDP percentage change'))
+
+s1 = summary(income_revenue_reg0, "hetero")
+s2 = summary(income_revenue_reg1, "hetero")
+s3 = summary(income_revenue_reg2, cluster = ~ fips)
+s4 = summary(income_revenue_reg3, cluster = ~ fips)
+table<-etable(list(s1, s2, s3, s4), order = c("x", "!Inter") ,style.tex = style.tex(depvar.title = "", fixef.title = "", fixef.suffix = " fixed effect"),tex = TRUE)
+   
+g1 = summary(gdp_revenue_reg0, "hetero")
+#g2 = summary(gdp_revenue_reg2, "hetero")
+g3 = summary(gdp_revenue_reg3, "hetero")
+g4 = summary(gdp_revenue_reg4, cluster = ~ fips)
+table2<-etable(list(g1, g3, g4), order = c("x", "!Inter") ,style.tex = style.tex(depvar.title = "", fixef.title = "", fixef.suffix = " fixed effect"),tex = TRUE)
+
+```
+```{r}
+
+p_business_ela <- ggplot(cov_df, aes(x=business_elasticity)) + 
+  geom_histogram()
+
+p_income_ela <- ggplot(cov_df, aes(x=income_elasticity)) + 
+  geom_histogram()
+
+library(usmap) 
+plot_df <- coef_df
+plot_df <- plot_df %>% group_by(fips) %>% mutate(average_mpc=mean(mpc)) %>% mutate(average_income=mean(annual_income))
+map <- plot_usmap(data = plot_df, values = "mpc", regions="counties", color = "blue",size=0.15) + scale_fill_continuous(low = "white", high = "blue", name = "Average Marginal Propensity to Consume", label = scales::comma) + 
+  theme(legend.position = "right")
+
+small_plot_df1 <- revenue_gdp_reg_df %>%
+  filter(year == 2020 & week == 2) %>% ungroup() %>%
+  select(fips, revenue1=revenue_all) 
+small_plot_df2 <- revenue_gdp_reg_df %>%
+  filter(year == 2021 & week == 4) %>% ungroup()%>%
+  select(fips, revenue2=revenue_all)
+small_plot_df<- small_plot_df2 %>% left_join(small_plot_df1, on=fips) %>% mutate(revenue_span=revenue2-revenue1)
+
+small_biz_map <- plot_usmap(data = small_plot_df, values = "revenue_span", regions="counties", color = "blue",size=0.15) + scale_fill_continuous(low = "white", high = "blue", name = "Average Marginal Propensity to Consume", label = scales::comma) + 
+  theme(legend.position = "right")
+```
+
+
+```{r}
+quantile_df <- revenue_gdp_reg_df[!is.na(revenue_gdp_reg_df$revenue_all), ] %>% ungroup()
+
+quantile_df <- quantile_df %>%
+  group_by(date_yw) %>%
+  summarize(quant25 = quantile(revenue_all, probs = 0.25),
+            quant50 = quantile(revenue_all, probs = 0.50),
+            quant75 = quantile(revenue_all, probs = 0.75)) %>% ungroup()
+
+quantile_df$date_yw<-gsub("(\\d{4})(\\d{2})$","\\1-\\2",quantile_df$date_yw)
+
+quantile_df$date <- as.Date(paste(quantile_df$date_yw, "5", sep = "-"), "%Y-%W-%u")
+quantile_df$year_month <- format(quantile_df$date, "%Y-%m")
+
+quantile_df_long <- gather(quantile_df, quant, value, quant25:quant75, factor_key=TRUE)
+
+quantile_plot <- ggplot(data=quantile_df_long, aes(x=date_yw, y=value, group=quant)) +
+  geom_line(aes(color=quant))+
+  geom_point(aes(color=quant))+scale_color_grey() + theme_classic()
+
+
+date_yw_inds <- seq(1,length(quantile_df$date_yw),by=4)
+
+quantile_error_plot<-ggplot(quantile_df, aes(x=factor(date_yw), y=quant50, label=year_month),color="blue") + 
+    geom_errorbar(aes(ymin=quant25, ymax=quant75),color="azure4", width=0.5) +
+    geom_point(color="darkslategrey")+xlab("Year-Month") + scale_x_discrete(breaks=quantile_df$date_yw[date_yw_inds], labels = quantile_df$year_month[date_yw_inds]) +
+    ylab("Small business revenue change (%)") +theme_minimal()+theme(axis.text.x = element_text(angle = 40,  hjust=1))
+    
+
+# error bar with sd
+data_summary <- function(data, varname, groupnames){
+  require(plyr)
+  summary_func <- function(x, col){
+    c(mean = mean(x[[col]], na.rm=TRUE),
+      sd = sd(x[[col]], na.rm=TRUE))
+  }
+  data_sum<-ddply(data, groupnames, .fun=summary_func,
+                  varname)
+  data_sum <- rename(data_sum, c("mean" = varname))
+ return(data_sum)
+}
+
+error_plot_df <- data_summary(revenue_gdp_reg_df, varname="revenue_all", groupnames="date_yw")
+
+error_plot<-ggplot(error_plot_df, aes(x=date_yw, y=revenue_all)) + 
+    geom_errorbar(aes(ymin=revenue_all-sd, ymax=revenue_all+sd), width=.1) +
+    geom_line() + geom_point()+
+   scale_color_brewer(palette="Paired")+theme_minimal()
+
+```
+
+```{r}
+
+elasticity_summary<-coef_df %>% ungroup() %>% select(income_elasticity,business_elasticity,mpc)
+stargazer(as.data.frame(elasticity_summary), type = "latex", title="Descriptive statistics", digits=1,omit.summary.stat = c('min','max','p25','p75'))
+#covariate.labels=c("Annual individual income","Weekly county income","Weekly income percentage change","County MPC","Weekly revenue percentage change","Weekly GDP percentage change","Num. of small business openings (rel. to Jan 2020)","New COVID-19 death rate")
+```
+
+
+
+
+
+
+
+
+
+

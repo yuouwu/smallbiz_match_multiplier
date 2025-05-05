@@ -1,0 +1,14 @@
+
+Descriptive statistics
+======================================================================================
+Statistic                                             N        Mean        St. Dev.   
+--------------------------------------------------------------------------------------
+Annual individual income                           51,935    44,963.9       6,223.5   
+Weekly county income                               51,935  124,676,686.0 266,436,325.0
+Weekly income percentage change                    50,950      0.000         0.03     
+County MPC                                         100,489      0.1           0.1     
+Weekly revenue percentage change                   100,489    -0.005          0.2     
+Weekly GDP percentage change                       100,489     -0.1           0.6     
+Num. of small business openings (rel. to Jan 2020) 102,409     -0.2           0.2     
+New COVID-19 death rate                            66,690       0.5           0.8     
+--------------------------------------------------------------------------------------
